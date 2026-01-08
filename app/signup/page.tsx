@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { Suspense, useEffect } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useAuth } from "@/contexts/auth-context"
 import { SignUpForm } from "@/components/auth/sign-up-form"
@@ -8,7 +8,7 @@ import Image from "next/image"
 import Link from "next/link"
 import { Loader2 } from "lucide-react"
 
-export default function SignUpPage() {
+function SignUpContent() {
   const { user, loading } = useAuth()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -107,6 +107,18 @@ export default function SignUpPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+export default function SignUpPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d]">
+        <Loader2 className="w-8 h-8 animate-spin text-white" />
+      </div>
+    }>
+      <SignUpContent />
+    </Suspense>
   )
 }
 
