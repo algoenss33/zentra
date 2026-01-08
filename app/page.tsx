@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { Suspense, useEffect, useState } from "react"
 import { LandingPage } from "@/components/landing-page"
 import { WalletDashboard } from "@/components/wallet-dashboard"
 import { MobileWallet } from "@/components/mobile-wallet"
@@ -8,7 +8,7 @@ import { useAuth } from "@/contexts/auth-context"
 import { Loader2 } from "lucide-react"
 import { useSearchParams } from "next/navigation"
 
-export default function Home() {
+function HomeContent() {
   const { user, loading } = useAuth()
   const searchParams = useSearchParams()
   const [isMobile, setIsMobile] = useState(false)
@@ -98,5 +98,24 @@ export default function Home() {
         <MobileWallet />
       </div>
     </div>
+  )
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div 
+        className="flex items-center justify-center bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d] relative overflow-hidden" 
+        style={{ 
+          height: '100dvh', 
+          width: '100vw',
+          minHeight: '100dvh'
+        }}
+      >
+        <Loader2 className="w-8 h-8 animate-spin text-white relative z-10" />
+      </div>
+    }>
+      <HomeContent />
+    </Suspense>
   )
 }
