@@ -3,7 +3,6 @@
 import { motion } from "framer-motion"
 import { useBalance } from "@/hooks/use-balance"
 import { useCryptoPrices } from "@/hooks/use-crypto-prices"
-import { Loader2 } from "lucide-react"
 import Image from "next/image"
 import { useMemo } from "react"
 
@@ -53,7 +52,7 @@ const FALLBACK_PRICES: Record<string, number> = {
 }
 
 export function AssetList() {
-  const { balances, loading, getBalance, zentraPrice } = useBalance()
+  const { balances, getBalance, zentraPrice } = useBalance()
   const { getPrice } = useCryptoPrices()
 
   // Helper function to get token price with fallback
@@ -105,22 +104,6 @@ export function AssetList() {
       return b.value - a.value
     })
   }, [balances, getBalance, zentraPrice, getPrice])
-
-  if (loading) {
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-        className="glass p-4 sm:p-6 rounded-xl"
-      >
-        <h3 className="text-lg sm:text-xl font-bold mb-4">Assets</h3>
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-6 h-6 animate-spin text-primary" />
-        </div>
-      </motion.div>
-    )
-  }
 
   return (
     <motion.div

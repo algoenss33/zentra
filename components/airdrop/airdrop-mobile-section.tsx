@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { motion } from "framer-motion"
 import { CheckCircle, Circle, Trophy, ExternalLink, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -13,7 +13,6 @@ type Task = Database['public']['Tables']['tasks']['Row']
 
 const AVAILABLE_TASKS = [
   { type: 'join_telegram_group', name: 'Join Telegram Group', reward: 5, link: 'https://t.me/zentragroup' },
-  { type: 'join_telegram_channel', name: 'Join Telegram Channel', reward: 5, link: 'https://t.me/zentrachannel' },
   { type: 'invite_3', name: 'Invite 3 People', reward: 10 },
   { type: 'invite_5', name: 'Invite 5 People', reward: 20 },
   { type: 'invite_10', name: 'Invite 10 People', reward: 50 },
@@ -22,71 +21,81 @@ const AVAILABLE_TASKS = [
 export function AirdropMobileSection() {
   const { profile } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false) // Start with false - don't block UI
   const [referralCount, setReferralCount] = useState(0)
   const [openedLinks, setOpenedLinks] = useState<Set<string>>(new Set())
   const [completingTask, setCompletingTask] = useState<string | null>(null)
   const timeoutRefs = useRef<Map<string, NodeJS.Timeout>>(new Map())
 
-  useEffect(() => {
-    if (profile) {
-      // Load tasks and referral count on mount/refresh
-      const initializeData = async () => {
-        await Promise.all([
-          loadTasks(true), // Show loading on initial load
-          loadReferralCount()
-        ])
-        
-        // After initial load, trigger balance update to ensure sync
-        // Small delay to ensure tasks are loaded first
-        setTimeout(() => {
-          window.dispatchEvent(new Event('balance-updated'))
-        }, 500)
+  const loadTasks = useCallback(async (showLoading: boolean = false) => {
+    if (!profile) return
+
+    if (showLoading) {
+      setLoading(true)
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('user_id', profile.id)
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      if (data) {
+        setTasks(data || [])
       }
-      
-      initializeData()
-
-      // Subscribe to real-time updates for tasks
-      const channel = supabase
-        .channel(`tasks-changes-${profile.id}-${Date.now()}`)
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'tasks',
-            filter: `user_id=eq.${profile.id}`,
-          },
-          () => {
-            // Update tasks in real-time without showing loading
-            loadTasks(false)
-            // Also trigger balance update when task changes
-            window.dispatchEvent(new Event('balance-updated'))
-          }
-        )
-        .subscribe()
-
-      // Listen for balance updates to reload tasks if needed
-      const handleBalanceUpdate = () => {
-        // Reload tasks in background to ensure sync
-        loadTasks(false)
-      }
-      
-      window.addEventListener('balance-updated', handleBalanceUpdate)
-
-      return () => {
-        supabase.removeChannel(channel).catch(() => {
-          // Silently handle channel removal errors during cleanup
-        })
-        window.removeEventListener('balance-updated', handleBalanceUpdate)
-        // Cleanup all pending timeouts
-        timeoutRefs.current.forEach((timeout) => {
-          clearTimeout(timeout)
-        })
-        timeoutRefs.current.clear()
+    } catch (error: any) {
+      console.error('Error loading tasks:', error)
+      // Don't show error toast - keep existing data
+    } finally {
+      if (showLoading) {
+        setLoading(false)
       }
     }
   }, [profile])
+
+  useEffect(() => {
+    if (!profile) {
+      setTasks([])
+      return
+    }
+
+    // Load tasks and referral count on mount
+    loadTasks(true)
+    loadReferralCount()
+
+    // Subscribe to real-time updates for tasks
+    const channel = supabase
+      .channel(`tasks-changes-${profile.id}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tasks',
+          filter: `user_id=eq.${profile.id}`,
+        },
+        () => {
+          // Update tasks in real-time without showing loading
+          loadTasks(false)
+          // Also trigger balance update when task changes
+          window.dispatchEvent(new Event('balance-updated'))
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {
+        // Silently handle channel removal errors during cleanup
+      })
+      // Cleanup all pending timeouts
+      timeoutRefs.current.forEach((timeout) => {
+        clearTimeout(timeout)
+      })
+      timeoutRefs.current.clear()
+    }
+  }, [profile, loadTasks])
 
   const loadReferralCount = async () => {
     if (!profile) return
@@ -105,37 +114,6 @@ export function AirdropMobileSection() {
     }
   }
 
-  const loadTasks = async (showLoading: boolean = false) => {
-    if (!profile) return
-
-    if (showLoading && loading) {
-      setLoading(true)
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('user_id', profile.id)
-        .order('created_at', { ascending: false })
-
-      if (error) throw error
-      
-      if (data) {
-        setTasks(data || [])
-      }
-    } catch (error: any) {
-      console.error('Error loading tasks:', error)
-      // Don't show error toast on background reloads
-      if (showLoading) {
-        toast.error('Failed to load tasks')
-      }
-    } finally {
-      if (showLoading) {
-        setLoading(false)
-      }
-    }
-  }
 
   const completeTask = async (taskType: string) => {
     if (!profile) return
@@ -302,26 +280,11 @@ export function AirdropMobileSection() {
       
       toast.success(`Task completed! You earned ${rewardAmount} ZENTRA tokens.`)
       
-      // Reload tasks to get actual data from database (realtime will also update)
-      // Don't show loading on background reload
+      // Reload tasks to get actual data from database (realtime subscription will also update)
       await loadTasks(false)
       
-      // Ensure tasks state is updated - reload again after a short delay to ensure state sync
-      setTimeout(async () => {
-        await loadTasks(false)
-        // Trigger balance update event after tasks are reloaded
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 300)
-      
-      // Trigger balance update event after tasks are reloaded
-      // Multiple triggers to ensure balance sync
+      // Trigger balance update once - real-time subscription will handle the rest
       window.dispatchEvent(new Event('balance-updated'))
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 600)
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 1000)
     } catch (error: any) {
       console.error('Error completing task:', error)
       toast.error('Failed to complete task. Please try again.')
@@ -346,11 +309,6 @@ export function AirdropMobileSection() {
     return null
   }
 
-  // Check if telegram group task is completed (required for telegram channel)
-  const isTelegramGroupCompleted = () => {
-    const telegramGroupTask = tasks.find(t => t.task_type === 'join_telegram_group')
-    return telegramGroupTask?.status === 'completed'
-  }
 
   // Handle link opening - automatically complete task for telegram tasks
   const handleOpenLink = async (taskType: string, link: string) => {
@@ -363,13 +321,10 @@ export function AirdropMobileSection() {
       timeoutRefs.current.delete(taskType)
     }
     
-    // Reload tasks to get latest status before proceeding
-    await loadTasks(false)
-    
-    // Check if task is already completed with fresh data
+    // Check if task is already completed (use current state - realtime will update)
     const existingTask = tasks.find(t => t.task_type === taskType)
     if (existingTask && existingTask.status === 'completed') {
-      // Task already completed, just open the link without auto-completing
+      // Task already completed, just open the link
       return
     }
     
@@ -377,78 +332,34 @@ export function AirdropMobileSection() {
     setOpenedLinks(prev => new Set(prev).add(taskType))
     
     // For telegram tasks, automatically complete after opening link
-    if (taskType === 'join_telegram_group' || taskType === 'join_telegram_channel') {
-      // Check prerequisites for telegram channel
-      if (taskType === 'join_telegram_channel') {
-        // Get fresh data from state after reload
-        const telegramGroupTask = tasks.find(t => t.task_type === 'join_telegram_group')
-        if (!telegramGroupTask || telegramGroupTask.status !== 'completed') {
-          // Still open link, but don't auto-complete
-          toast.info('Please complete "Join Telegram Group" task first')
-          return
-        }
-        
-        // Double-check if channel task is already completed
-        const channelTask = tasks.find(t => t.task_type === 'join_telegram_channel')
-        if (channelTask && channelTask.status === 'completed') {
-          return
-        }
-      } else {
-        // For telegram group, check if already completed
-        const currentTask = tasks.find(t => t.task_type === taskType)
-        if (currentTask && currentTask.status === 'completed') {
-          return
-        }
-      }
-      
+    if (taskType === 'join_telegram_group') {
       // Small delay to ensure link opens, then auto-complete
-      const timeoutId = setTimeout(async () => {
-        // Reload tasks again to get latest status before completing
-        await loadTasks(false)
-        
-        // Get fresh task data from database by reloading
-        const { data: freshTasks } = await supabase
-          .from('tasks')
-          .select('*')
-          .eq('user_id', profile.id)
-          .order('created_at', { ascending: false })
-        
-        if (freshTasks) {
-          // Check with fresh data from database
-          const finalCheckTask = freshTasks.find((t: Task) => t.task_type === taskType)
-          if (!finalCheckTask || finalCheckTask.status !== 'completed') {
-            // For telegram channel, verify group is still completed with fresh data
-            if (taskType === 'join_telegram_channel') {
-              const telegramGroupTask = freshTasks.find((t: Task) => t.task_type === 'join_telegram_group')
-              if (!telegramGroupTask || telegramGroupTask.status !== 'completed') {
-                timeoutRefs.current.delete(taskType)
-                return
-              }
-            }
-            await completeTask(taskType)
-          }
-        }
-        timeoutRefs.current.delete(taskType)
-      }, 800) // Slightly longer delay for better reliability
+      const timeoutId = setTimeout(() => {
+        completeTask(taskType).finally(() => {
+          timeoutRefs.current.delete(taskType)
+        })
+      }, 800)
       
       timeoutRefs.current.set(taskType, timeoutId)
     }
   }
 
-  const totalRewards = tasks
-    .filter(t => t.status === 'completed')
-    .reduce((sum, t) => sum + (t.reward_amount || 0), 0)
+  const totalRewards = useMemo(() => {
+    return tasks
+      .filter(t => t.status === 'completed')
+      .reduce((sum, t) => sum + (t.reward_amount || 0), 0)
+  }, [tasks])
 
   return (
     <div className="relative w-full h-full bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d] text-white overflow-hidden">
-      {/* Ambient glows */}
-      <div className="absolute -top-20 -left-16 w-60 h-60 bg-[#7c5dff]/25 blur-[90px] pointer-events-none" />
-      <div className="absolute bottom-0 right-0 w-64 h-64 bg-[#f472b6]/20 blur-[110px] pointer-events-none" />
-      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-72 h-72 bg-[#22d3ee]/12 blur-[120px] pointer-events-none" />
+      {/* Ambient glows - optimized with will-change for better performance */}
+      <div className="absolute -top-20 -left-16 w-60 h-60 bg-[#7c5dff]/20 blur-[70px] pointer-events-none will-change-transform" />
+      <div className="absolute bottom-0 right-0 w-64 h-64 bg-[#f472b6]/15 blur-[80px] pointer-events-none will-change-transform" />
+      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-72 h-72 bg-[#22d3ee]/10 blur-[90px] pointer-events-none will-change-transform" />
 
       <div className="relative h-full flex flex-col">
         {/* Header */}
-        <div className="px-4 pt-8 pb-4 bg-black/20 backdrop-blur-xl flex-shrink-0 border-b border-white/10">
+        <div className="px-4 pt-8 pb-4 bg-black/20 backdrop-blur-md flex-shrink-0 border-b border-white/10">
           <div>
             <h2 className="text-xl font-bold mb-1">Airdrop</h2>
             <p className="text-sm text-gray-300">Complete tasks to earn ZENTRA tokens</p>
@@ -474,28 +385,24 @@ export function AirdropMobileSection() {
               const isCompleted = status === 'completed'
               const progress = getTaskProgress(task.type)
               const canComplete = !progress || progress.current >= progress.required
-              
-              // Check if telegram channel requires telegram group to be completed first
-              const requiresTelegramGroup = task.type === 'join_telegram_channel'
-              const telegramGroupCompleted = isTelegramGroupCompleted()
               const hasOpenedLink = openedLinks.has(task.type)
               
               // Show complete button if:
               // 1. Task is already completed - always show completed status
-              // 2. For telegram tasks with link: link has been opened AND (no prerequisite OR prerequisite completed)
+              // 2. For telegram tasks with link: link has been opened
               // 3. For invite tasks: progress requirement met
               const canShowComplete = isCompleted 
                 ? true // Always show completed status
                 : task.link 
-                  ? hasOpenedLink && (!requiresTelegramGroup || telegramGroupCompleted)
-                  : !requiresTelegramGroup || telegramGroupCompleted
+                  ? hasOpenedLink
+                  : true
 
               return (
                 <motion.div
                   key={task.type}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="bg-white/5 rounded-xl p-4 shadow-[0_10px_30px_rgba(0,0,0,0.28)] border border-white/10 backdrop-blur-lg"
+                  className="bg-white/5 rounded-xl p-4 shadow-[0_10px_30px_rgba(0,0,0,0.28)] border border-white/10 backdrop-blur-sm"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 flex-1">
@@ -514,13 +421,7 @@ export function AirdropMobileSection() {
                             Progress: {progress.current}/{progress.required} invites
                           </div>
                         )}
-                        {requiresTelegramGroup && !telegramGroupCompleted && !isCompleted && (
-                          <div className="text-xs text-amber-400 mb-2 flex items-center gap-1">
-                            <span>⚠️</span>
-                            <span>Complete "Join Telegram Group" first</span>
-                          </div>
-                        )}
-                        {task.link && !hasOpenedLink && !isCompleted && (!requiresTelegramGroup || telegramGroupCompleted) && (
+                        {task.link && !hasOpenedLink && !isCompleted && (
                           <div className="text-xs text-blue-400 mb-2">
                             Click "Open Link" to enable Complete button
                           </div>
@@ -562,8 +463,6 @@ export function AirdropMobileSection() {
                             'Complete'
                           )}
                         </Button>
-                      ) : hasOpenedLink && requiresTelegramGroup && !telegramGroupCompleted ? (
-                        <span className="text-xs text-amber-400">Waiting...</span>
                       ) : (
                         <span className="text-xs text-gray-500">Locked</span>
                       )}

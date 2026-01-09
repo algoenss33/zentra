@@ -70,8 +70,8 @@ Object.keys(COINGECKO_IDS).forEach(() => {
   circuitBreakers.set('binance', { failures: 0, lastFailureTime: 0, isOpen: false })
 })
 
-const CIRCUIT_BREAKER_THRESHOLD = 3 // Open after 3 failures (more sensitive)
-const CIRCUIT_BREAKER_RESET_TIME = 300000 // Reset after 5 minutes (longer cooldown for rate limits)
+const CIRCUIT_BREAKER_THRESHOLD = 5 // Open after 5 failures (less sensitive)
+const CIRCUIT_BREAKER_RESET_TIME = 120000 // Reset after 2 minutes (shorter cooldown)
 
 function checkCircuitBreaker(apiName: string): boolean {
   const breaker = circuitBreakers.get(apiName)
@@ -80,11 +80,12 @@ function checkCircuitBreaker(apiName: string): boolean {
   if (breaker.isOpen) {
     const timeSinceLastFailure = Date.now() - breaker.lastFailureTime
     if (timeSinceLastFailure > CIRCUIT_BREAKER_RESET_TIME) {
-      // Reset circuit breaker
+      // Reset circuit breaker - try again after cooldown
       breaker.isOpen = false
       breaker.failures = 0
       return true
     }
+    // Circuit breaker is open - skip this API and use fallback
     return false
   }
   return true
@@ -97,9 +98,10 @@ function recordFailure(apiName: string) {
   breaker.failures++
   breaker.lastFailureTime = Date.now()
 
-  if (breaker.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+  if (breaker.failures >= CIRCUIT_BREAKER_THRESHOLD && !breaker.isOpen) {
     breaker.isOpen = true
-    console.warn(`⚠️ Circuit breaker opened for ${apiName}`)
+    // Only log once when circuit breaker opens, not on every failure
+    // Silently use fallback prices instead
   }
 }
 
@@ -116,7 +118,7 @@ async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   maxRetries: number = 3,
   baseDelay: number = 1000
-): Promise<T> {
+): Promise<T | null> {
   let lastError: Error | null = null
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -127,13 +129,18 @@ async function retryWithBackoff<T>(
       
       if (attempt < maxRetries - 1) {
         const delay = baseDelay * Math.pow(2, attempt)
-        console.log(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms...`)
+        // Only log retry for non-network errors
+        const errorMessage = lastError.message
+        if (!errorMessage.includes('aborted') && !errorMessage.includes('Network error')) {
+          console.log(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms...`)
+        }
         await new Promise(resolve => setTimeout(resolve, delay))
       }
     }
   }
 
-  throw lastError || new Error('Max retries exceeded')
+  // Return null instead of throwing to allow fallback prices
+  return null
 }
 
 // Fetch from CoinGecko
@@ -156,13 +163,17 @@ async function fetchFromCoinGecko(): Promise<CryptoPrices | null> {
         'Accept': 'application/json',
       },
       cache: 'no-store',
+    }).catch((fetchError) => {
+      // Handle network errors (ERR_NAME_NOT_RESOLVED, etc.)
+      clearTimeout(timeoutId)
+      throw new Error(`Network error: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`)
     })
 
     clearTimeout(timeoutId)
 
-    if (!response.ok) {
+    if (!response || !response.ok) {
       // Handle rate limiting specifically
-      if (response.status === 429) {
+      if (response?.status === 429) {
         // Rate limit exceeded - open circuit breaker for longer
         recordFailure('coingecko')
         const breaker = circuitBreakers.get('coingecko')
@@ -172,10 +183,13 @@ async function fetchFromCoinGecko(): Promise<CryptoPrices | null> {
         }
         throw new Error('CoinGecko rate limit exceeded (429). Please wait before retrying.')
       }
-      throw new Error(`CoinGecko HTTP error! status: ${response.status}`)
+      throw new Error(`CoinGecko HTTP error! status: ${response?.status || 'unknown'}`)
     }
 
-    const data = await response.json()
+    const data = await response.json().catch((parseError) => {
+      throw new Error(`Failed to parse CoinGecko response: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
+    })
+    
     const newPrices: CryptoPrices = {}
 
     Object.entries(COINGECKO_IDS).forEach(([symbol, coinId]) => {
@@ -200,7 +214,11 @@ async function fetchFromCoinGecko(): Promise<CryptoPrices | null> {
     throw new Error('No valid prices from CoinGecko')
   } catch (error) {
     recordFailure('coingecko')
-    console.warn('❌ CoinGecko failed:', error instanceof Error ? error.message : String(error))
+    // Only log error, don't throw - return null to use fallback
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    if (!errorMessage.includes('aborted') && !errorMessage.includes('Network error')) {
+      console.warn('❌ CoinGecko failed:', errorMessage)
+    }
     return null
   }
 }
@@ -225,15 +243,22 @@ async function fetchFromCoinCap(): Promise<CryptoPrices | null> {
         'Accept': 'application/json',
       },
       cache: 'no-store',
+    }).catch((fetchError) => {
+      // Handle network errors (ERR_NAME_NOT_RESOLVED, etc.)
+      clearTimeout(timeoutId)
+      throw new Error(`Network error: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`)
     })
 
     clearTimeout(timeoutId)
 
-    if (!response.ok) {
-      throw new Error(`CoinCap HTTP error! status: ${response.status}`)
+    if (!response || !response.ok) {
+      throw new Error(`CoinCap HTTP error! status: ${response?.status || 'unknown'}`)
     }
 
-    const data = await response.json()
+    const data = await response.json().catch((parseError) => {
+      throw new Error(`Failed to parse CoinCap response: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
+    })
+    
     const newPrices: CryptoPrices = {}
 
     if (data.data && Array.isArray(data.data)) {
@@ -263,7 +288,11 @@ async function fetchFromCoinCap(): Promise<CryptoPrices | null> {
     throw new Error('No valid prices from CoinCap')
   } catch (error) {
     recordFailure('coincap')
-    console.warn('❌ CoinCap failed:', error instanceof Error ? error.message : String(error))
+    // Only log error, don't throw - return null to use fallback
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    if (!errorMessage.includes('aborted') && !errorMessage.includes('Network error')) {
+      console.warn('❌ CoinCap failed:', errorMessage)
+    }
     return null
   }
 }
@@ -409,12 +438,18 @@ export function useCryptoPrices() {
       let binancePrices: PromiseSettledResult<CryptoPrices | null>
 
       try {
-        [coingeckoPrices, coincapPrices, binancePrices] = await Promise.allSettled([
-          retryWithBackoff(() => fetchFromCoinGecko(), 2, 1000).catch(() => null),
-          retryWithBackoff(() => fetchFromCoinCap(), 2, 1000).catch(() => null),
-          retryWithBackoff(() => fetchFromBinance(), 2, 1000).catch(() => null),
+        // Use Promise.allSettled to handle all errors gracefully
+        const results = await Promise.allSettled([
+          retryWithBackoff(() => fetchFromCoinGecko(), 2, 1000),
+          retryWithBackoff(() => fetchFromCoinCap(), 2, 1000),
+          retryWithBackoff(() => fetchFromBinance(), 2, 1000),
         ])
+        
+        coingeckoPrices = results[0]
+        coincapPrices = results[1]
+        binancePrices = results[2]
       } catch (error) {
+        // This should rarely happen since we're using allSettled, but handle it anyway
         console.warn('Error fetching prices from APIs:', error)
         // Continue with empty results - will use fallback prices
         coingeckoPrices = { status: 'rejected', reason: error }
@@ -437,10 +472,10 @@ export function useCryptoPrices() {
       // Merge prices from all sources
       const mergedPrices = mergePrices(...priceSources)
 
-      // Fill missing prices with fallback
+      // Fill missing prices with fallback - ensure ALL symbols have prices
       const finalPrices: CryptoPrices = { ...mergedPrices }
       Object.entries(COINGECKO_IDS).forEach(([symbol]) => {
-        if (!finalPrices[symbol] || finalPrices[symbol].price === 0) {
+        if (!finalPrices[symbol] || finalPrices[symbol].price === 0 || isNaN(finalPrices[symbol].price)) {
           const fallback = FALLBACK_PRICES[symbol]
           if (fallback) {
             finalPrices[symbol] = {
@@ -448,21 +483,20 @@ export function useCryptoPrices() {
               change24h: fallback.change24h,
               lastUpdated: new Date().toISOString(),
             }
-            console.warn(`⚠️ ${symbol} using fallback price: $${fallback.price}`)
+            // Only log if we're actually using fallback (not initial load)
+            if (Object.keys(prices).length > 0) {
+              console.warn(`⚠️ ${symbol} using fallback price: $${fallback.price}`)
+            }
           }
         }
       })
 
+      // Always ensure we have prices for all symbols
       setPrices(finalPrices)
       lastFetchTime.current = now
 
-      if (Object.keys(mergedPrices).length === 0) {
-        setError('All APIs failed, using fallback prices')
-      } else if (Object.keys(mergedPrices).length < Object.keys(COINGECKO_IDS).length) {
-        setError('Some prices unavailable, using fallback for missing tokens')
-      } else {
-        setError(null)
-      }
+      // Don't set error state - silently use fallback to prevent UI issues
+      setError(null)
     } catch (err) {
       // Silently handle errors - don't crash the app
       console.warn('Error in fetchPrices (using fallback):', err)
@@ -480,12 +514,25 @@ export function useCryptoPrices() {
             }
           }
         })
+        // Always set fallback prices, even if we had some prices before
         setPrices(fallbackPrices)
+        setError(null) // Clear error since we have fallback
         // Don't set error state - silently use fallback
       } catch (fallbackError) {
         console.error('Critical error setting fallback prices:', fallbackError)
-        // Even if fallback fails, ensure we have empty prices object
-        setPrices({})
+        // Even if fallback fails, ensure we have fallback prices
+        const emergencyPrices: CryptoPrices = {}
+        Object.entries(COINGECKO_IDS).forEach(([symbol]) => {
+          const fallback = FALLBACK_PRICES[symbol]
+          if (fallback) {
+            emergencyPrices[symbol] = {
+              price: fallback.price,
+              change24h: fallback.change24h,
+              lastUpdated: new Date().toISOString(),
+            }
+          }
+        })
+        setPrices(emergencyPrices)
       }
     } finally {
       setLoading(false)
@@ -508,6 +555,7 @@ export function useCryptoPrices() {
     })
     setPrices(initialPrices)
     setLoading(false)
+    setError(null) // Clear any previous errors
 
     // Fetch prices in background (non-blocking)
     let isMounted = true
@@ -517,7 +565,19 @@ export function useCryptoPrices() {
       } catch (error) {
         // Silently handle - already have fallback prices
         if (isMounted) {
-          console.warn('Background price fetch failed, using fallback')
+          // Ensure fallback prices are still set even if fetch fails completely
+          const fallbackPrices: CryptoPrices = {}
+          Object.entries(COINGECKO_IDS).forEach(([symbol]) => {
+            const fallback = FALLBACK_PRICES[symbol]
+            if (fallback) {
+              fallbackPrices[symbol] = {
+                price: fallback.price,
+                change24h: fallback.change24h,
+                lastUpdated: new Date().toISOString(),
+              }
+            }
+          })
+          setPrices(fallbackPrices)
         }
       }
     }
@@ -542,13 +602,30 @@ export function useCryptoPrices() {
 
   const getPrice = (symbol: string): number | null => {
     try {
-      if (!symbol || !prices) return null
+      if (!symbol) {
+        // Return fallback if symbol is invalid
+        const fallback = FALLBACK_PRICES[symbol]
+        return fallback ? fallback.price : null
+      }
+      
+      if (!prices || Object.keys(prices).length === 0) {
+        // If no prices loaded yet, return fallback
+        const fallback = FALLBACK_PRICES[symbol]
+        return fallback ? fallback.price : null
+      }
+      
       const price = prices[symbol]?.price
-      if (price === undefined || price === null || price === 0 || isNaN(price)) return null
+      if (price === undefined || price === null || price === 0 || isNaN(price)) {
+        // Return fallback if price is invalid
+        const fallback = FALLBACK_PRICES[symbol]
+        return fallback ? fallback.price : null
+      }
       return price
     } catch (error) {
       console.warn('Error getting price for', symbol, error)
-      return null
+      // Always return fallback on error
+      const fallback = FALLBACK_PRICES[symbol]
+      return fallback ? fallback.price : null
     }
   }
 

@@ -12,6 +12,8 @@ const getTransactionIcon = (type: string) => {
       return Send
     case 'receive':
       return ArrowDownLeft
+    case 'swap':
+      return ArrowLeftRight
     case 'airdrop':
       return Gift
     case 'task_reward':
@@ -29,6 +31,8 @@ const getTransactionLabel = (type: string) => {
       return 'Sent'
     case 'receive':
       return 'Received'
+    case 'swap':
+      return 'Swap'
     case 'airdrop':
       return 'Airdrop'
     case 'task_reward':
@@ -46,6 +50,8 @@ const getTransactionColor = (type: string) => {
       return 'text-red-400'
     case 'receive':
       return 'text-green-400'
+    case 'swap':
+      return 'text-cyan-400'
     case 'airdrop':
       return 'text-purple-400'
     case 'task_reward':
@@ -63,6 +69,8 @@ const getTransactionBgColor = (type: string) => {
       return 'bg-red-400/10'
     case 'receive':
       return 'bg-green-400/10'
+    case 'swap':
+      return 'bg-cyan-400/10'
     case 'airdrop':
       return 'bg-purple-400/10'
     case 'task_reward':
@@ -97,25 +105,7 @@ export function ActivityMobileSection() {
     prevTransactionsCountRef.current = transactions.length
   }, [transactions])
 
-  if (loading) {
-    return (
-      <div className="flex-1 overflow-y-auto scrollbar-hidden px-4 py-6 relative" style={{
-        paddingBottom: 'calc(4rem + env(safe-area-inset-bottom))',
-        WebkitOverflowScrolling: 'touch',
-        overscrollBehavior: 'contain'
-      }}>
-        <div className="max-w-md mx-auto w-full">
-          <div className="bg-white/6 rounded-2xl p-6 border border-white/10 backdrop-blur-sm">
-            <h3 className="text-lg font-bold text-white mb-4">Activity</h3>
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-6 h-6 animate-spin text-white" />
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
+  // Don't block UI with loading - always show content
   if (transactions.length === 0) {
     return (
       <div className="flex-1 overflow-y-auto scrollbar-hidden px-4 py-6 relative" style={{
@@ -153,6 +143,7 @@ export function ActivityMobileSection() {
             {transactions.map((tx, index) => {
               const Icon = getTransactionIcon(tx.type)
               const isOutgoing = tx.type === 'send'
+              const isSwap = tx.type === 'swap'
               const timeAgo = formatDistanceToNow(new Date(tx.created_at), { addSuffix: true })
               const iconColor = getTransactionColor(tx.type)
               const iconBg = getTransactionBgColor(tx.type)
@@ -207,6 +198,8 @@ export function ActivityMobileSection() {
                             ? `to ${tx.to_address.slice(0, 6)}...${tx.to_address.slice(-4)}`
                             : tx.type === 'receive' && tx.from_address
                             ? `from ${tx.from_address.slice(0, 6)}...${tx.from_address.slice(-4)}`
+                            : tx.type === 'swap'
+                            ? 'Token swap completed'
                             : tx.type === 'task_reward'
                             ? 'Task completed'
                             : tx.type === 'referral_reward'
@@ -230,8 +223,8 @@ export function ActivityMobileSection() {
                     
                     <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5">
                       <div>
-                        <p className={`font-bold text-sm ${isOutgoing ? 'text-red-400' : 'text-green-400'}`}>
-                          {isOutgoing ? "-" : "+"}
+                        <p className={`font-bold text-sm ${isOutgoing ? 'text-red-400' : isSwap ? 'text-cyan-400' : 'text-green-400'}`}>
+                          {isOutgoing ? "-" : isSwap ? "↔" : "+"}
                           {tx.amount.toFixed(tx.token === 'ZENTRA' ? 0 : 4)} {tx.token}
                         </p>
                         <p className="text-xs text-gray-400 mt-0.5">${tx.usd_value.toFixed(2)}</p>

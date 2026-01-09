@@ -201,14 +201,7 @@ export function MobileWallet() {
     { icon: TrendingUp, label: 'Airdrop', color: 'bg-orange-500', onClick: () => setActiveTab('airdrop') },
   ]
 
-  if (loading) {
-    return (
-      <div className="bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d] flex items-center justify-center" style={{ height: '100dvh', width: '100vw' }}>
-        <Loader2 className="w-8 h-8 animate-spin text-white" />
-      </div>
-    )
-  }
-
+  // Don't block UI with loading - always show content with fallback data
   return (
     <div className="bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d] w-full h-full relative flex flex-col overflow-hidden" style={{ 
       height: '100dvh', 

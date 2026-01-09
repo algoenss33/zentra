@@ -27,7 +27,7 @@ type WithdrawFormData = z.infer<typeof withdrawSchema>
 export function WithdrawSection() {
   const { profile } = useAuth()
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false) // Start with false - don't block UI
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const {
@@ -42,14 +42,12 @@ export function WithdrawSection() {
     },
   })
 
-  useEffect(() => {
-    if (profile) {
-      loadWithdrawals()
-    }
-  }, [profile])
-
-  const loadWithdrawals = async () => {
+  const loadWithdrawals = useCallback(async (showLoading: boolean = false) => {
     if (!profile) return
+
+    if (showLoading) {
+      setLoading(true)
+    }
 
     try {
       const { data, error } = await supabase
@@ -59,14 +57,52 @@ export function WithdrawSection() {
         .order('created_at', { ascending: false })
 
       if (error) throw error
-      setWithdrawals(data || [])
+      if (data) {
+        setWithdrawals(data || [])
+      }
     } catch (error: any) {
       console.error('Error loading withdrawals:', error)
-      toast.error('Failed to load withdrawals')
+      // Don't show error toast - keep existing data
     } finally {
-      setLoading(false)
+      if (showLoading) {
+        setLoading(false)
+      }
     }
-  }
+  }, [profile])
+
+  useEffect(() => {
+    if (!profile) {
+      setWithdrawals([])
+      return
+    }
+
+    // Load withdrawals on mount
+    loadWithdrawals(true)
+
+    // Subscribe to real-time updates
+    const channel = supabase
+      .channel(`withdrawals-changes-${profile.id}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'withdrawals',
+          filter: `user_id=eq.${profile.id}`,
+        },
+        () => {
+          // Update in background without showing loading
+          loadWithdrawals(false)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {
+        // Silently handle channel removal errors during cleanup
+      })
+    }
+  }, [profile, loadWithdrawals])
 
   const onSubmit = async (data: WithdrawFormData) => {
     if (!profile) return

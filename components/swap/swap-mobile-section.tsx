@@ -37,8 +37,8 @@ interface SwapMobileSectionProps {
 
 export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
   const { profile } = useAuth()
-  const { getBalance, balances, loading: balanceLoading, reloadBalances } = useBalance()
-  const { getPrice, formatPrice } = useCryptoPrices()
+  const { getBalance, reloadBalances } = useBalance()
+  const { getPrice } = useCryptoPrices()
   const [fromToken, setFromToken] = useState<Token>(AVAILABLE_TOKENS[0])
   const [toToken, setToToken] = useState<Token>(AVAILABLE_TOKENS.find(token => token.symbol === 'USDT') || AVAILABLE_TOKENS[1])
   const [fromAmount, setFromAmount] = useState<string>('')
@@ -49,25 +49,11 @@ export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
   const [showToTokenSelector, setShowToTokenSelector] = useState(false)
   const [isSwapping, setIsSwapping] = useState(false)
 
-  // Get balances with proper formatting and debug logging
+  // Get balances with proper formatting
   const fromBalanceRaw = getBalance(fromToken.symbol)
   const toBalanceRaw = getBalance(toToken.symbol)
   const fromBalance = fromBalanceRaw || 0
   const toBalance = toBalanceRaw || 0
-
-  // Debug logging
-  useEffect(() => {
-    if (fromToken.symbol === 'ZENTRA' || toToken.symbol === 'ZENTRA') {
-      console.log('Swap balances:', {
-        fromToken: fromToken.symbol,
-        fromBalance: fromBalance,
-        toToken: toToken.symbol,
-        toBalance: toBalance,
-        allBalances: balances,
-        balanceLoading
-      })
-    }
-  }, [fromToken.symbol, toToken.symbol, fromBalance, toBalance, balances, balanceLoading])
 
   // Format balance display helper
   const formatBalance = (balance: number, decimals: number): string => {
@@ -126,20 +112,8 @@ export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
     if (fromPrice === 0 || toPrice === 0) {
       return 0
     }
-    const rate = fromPrice / toPrice
-    // Debug for ZENTRA swaps
-    if (fromToken.symbol === 'ZENTRA' || toToken.symbol === 'ZENTRA') {
-      console.log('Exchange rate calculation:', {
-        fromToken: fromToken.symbol,
-        fromPrice,
-        toToken: toToken.symbol,
-        toPrice,
-        rate,
-        explanation: `1 ${fromToken.symbol} = ${rate} ${toToken.symbol}`
-      })
-    }
-    return rate
-  }, [fromPrice, toPrice, fromToken.symbol, toToken.symbol])
+    return fromPrice / toPrice
+  }, [fromPrice, toPrice])
 
   // Get stable decimals value
   const toTokenDecimals = useMemo(() => toToken.decimals, [toToken.decimals])
@@ -160,24 +134,6 @@ export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
       // This ensures consistency between the amount and its USD value
       const usdValue = minReceived * toPrice
       setToAmountUsdValue(usdValue)
-      
-      // Debug for ZENTRA swaps
-      if (fromToken.symbol === 'ZENTRA' || toToken.symbol === 'ZENTRA') {
-        console.log('To amount calculation:', {
-          fromAmount: fromAmountNum,
-          fromToken: fromToken.symbol,
-          fromPrice,
-          exchangeRate,
-          calculated,
-          slippage,
-          minReceived,
-          toToken: toToken.symbol,
-          toPrice,
-          toTokenDecimals,
-          usdValue,
-          formattedUsd: usdValue.toFixed(2)
-        })
-      }
       
       // Use toToken.decimals, not fromToken.decimals!
       const formattedAmount = minReceived.toFixed(toTokenDecimals)
@@ -221,170 +177,184 @@ export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
       return
     }
 
+    // Prevent double-clicking
+    if (isSwapping) {
+      return
+    }
+
     setIsSwapping(true)
+
+    // Timeout safety - force reset after 30 seconds
+    const timeoutId = setTimeout(() => {
+      setIsSwapping(false)
+      toast.error('Swap timeout - please try again')
+    }, 30000)
 
     try {
       const toAmountNum = parseFloat(toAmount)
+      if (isNaN(toAmountNum) || toAmountNum <= 0) {
+        throw new Error('Invalid swap amount')
+      }
+
       const fromUsdValue = fromAmountNum * fromPrice
       const toUsdValue = toAmountNum * toPrice
 
-      // Helper function to execute database operations with retry and better error handling
-      const executeWithRetry = async <T,>(
-        operation: () => Promise<{ data: T | null; error: any }>,
-        operationName: string,
-        maxRetries: number = 2
-      ): Promise<T> => {
-        let lastError: any = null
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            const result = await operation()
-            
-            if (result.error) {
-              // If it's a "not found" error and we're looking for balance, that's okay
-              if (result.error.code === 'PGRST116') {
-                return null as T
-              }
-              throw result.error
-            }
-            
-            return result.data as T
-          } catch (error: any) {
-            lastError = error
-            
-            // Don't retry on certain errors
-            if (error.code === 'PGRST116' || error.message?.includes('Insufficient')) {
-              throw error
-            }
-            
-            // Wait before retry (exponential backoff)
-            if (attempt < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)))
-              console.log(`Retrying ${operationName} (attempt ${attempt + 2}/${maxRetries + 1})...`)
-            }
-          }
-        }
-        
-        throw new Error(`${operationName} failed after ${maxRetries + 1} attempts: ${lastError?.message || 'Unknown error'}`)
-      }
+      // Update from token balance (subtract) - with timeout
+      const fromBalancePromise = supabase
+        .from('balances')
+        .select('*')
+        .eq('user_id', profile.id)
+        .eq('token', fromToken.symbol)
+        .single()
 
-      // Update from token balance (subtract)
-      const fromBalanceData = await executeWithRetry(
-        () => supabase
-          .from('balances')
-          .select('*')
-          .eq('user_id', profile.id)
-          .eq('token', fromToken.symbol)
-          .single(),
-        'Fetch from balance'
-      )
+      const fromBalanceResult = await Promise.race([
+        fromBalancePromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), 10000)
+        )
+      ]) as { data: any, error: any }
 
-      if (!fromBalanceData) {
+      if (fromBalanceResult.error || !fromBalanceResult.data) {
         throw new Error('Balance not found')
       }
 
+      const fromBalanceData = fromBalanceResult.data
       const newFromBalance = fromBalanceData.balance - fromAmountNum
       if (newFromBalance < 0) {
         throw new Error('Insufficient balance')
       }
 
-      // Update from token balance
-      await executeWithRetry(
-        () => supabase
-          .from('balances')
-          .update({ balance: newFromBalance, updated_at: new Date().toISOString() })
-          .eq('id', fromBalanceData.id),
-        'Update from balance'
-      )
+      // Update from token balance - with timeout
+      // @ts-ignore - Supabase type issue
+      const updateFromPromise = supabase
+        .from('balances')
+        // @ts-ignore
+        .update({ balance: newFromBalance, updated_at: new Date().toISOString() })
+        .eq('id', fromBalanceData.id)
 
-      // Update to token balance (add)
-      const toBalanceData = await executeWithRetry(
-        () => supabase
-          .from('balances')
-          .select('*')
-          .eq('user_id', profile.id)
-          .eq('token', toToken.symbol)
-          .single(),
-        'Fetch to balance'
-      )
+      const updateFromResult = await Promise.race([
+        updateFromPromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), 10000)
+        )
+      ]) as { error: any }
 
-      if (toBalanceData) {
-        await executeWithRetry(
-          () => supabase
-            .from('balances')
-            .update({ balance: toBalanceData.balance + toAmountNum, updated_at: new Date().toISOString() })
-            .eq('id', toBalanceData.id),
-          'Update to balance'
-        )
-      } else {
-        // Create new balance if doesn't exist
-        await executeWithRetry(
-          () => supabase
-            .from('balances')
-            .insert({
-              user_id: profile.id,
-              token: toToken.symbol,
-              balance: toAmountNum,
-            }),
-          'Create to balance'
-        )
+      if (updateFromResult.error) {
+        throw updateFromResult.error
       }
 
-      // Create transaction records (non-blocking - don't fail swap if this fails)
-      try {
-        await executeWithRetry(
-          () => supabase
-            .from('transactions')
-            .insert([
-              {
-                user_id: profile.id,
-                type: 'send',
-                token: fromToken.symbol,
-                amount: -fromAmountNum,
-                usd_value: fromUsdValue,
-                status: 'confirmed',
-              },
-              {
-                user_id: profile.id,
-                type: 'receive',
-                token: toToken.symbol,
-                amount: toAmountNum,
-                usd_value: toUsdValue,
-                status: 'confirmed',
-              },
-            ]),
-          'Create transaction records',
-          1 // Only 1 retry for transactions since it's non-critical
+      // Update to token balance (add) - with timeout
+      const toBalancePromise = supabase
+        .from('balances')
+        .select('*')
+        .eq('user_id', profile.id)
+        .eq('token', toToken.symbol)
+        .single()
+
+      const toBalanceResult = await Promise.race([
+        toBalancePromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), 10000)
         )
+      ]) as { data: any, error: any }
+
+      if (toBalanceResult.data) {
+        const toBalanceData = toBalanceResult.data
+        // @ts-ignore - Supabase type issue
+        const updateToPromise = supabase
+          .from('balances')
+          // @ts-ignore
+          .update({ balance: toBalanceData.balance + toAmountNum, updated_at: new Date().toISOString() })
+          .eq('id', toBalanceData.id)
+        
+        const updateToResult = await Promise.race([
+          updateToPromise,
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Request timeout')), 10000)
+          )
+        ]) as { error: any }
+
+        if (updateToResult.error) {
+          throw updateToResult.error
+        }
+      } else {
+        // Create new balance if doesn't exist - with timeout
+        // @ts-ignore - Supabase type issue
+        const createToPromise = supabase
+          .from('balances')
+          // @ts-ignore
+          .insert({
+            user_id: profile.id,
+            token: toToken.symbol,
+            balance: toAmountNum,
+          })
+        
+        const createToResult = await Promise.race([
+          createToPromise,
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Request timeout')), 10000)
+          )
+        ]) as { error: any }
+
+        if (createToResult.error) {
+          throw createToResult.error
+        }
+      }
+
+      // Create transaction record for swap (non-blocking - don't fail swap if this fails)
+      // Only create one 'swap' transaction instead of 'send' and 'receive'
+      // 'send' transactions are excluded from activity (only popup notification)
+      try {
+        // @ts-ignore - Supabase type issue
+        await Promise.race([
+          // @ts-ignore
+          supabase
+            .from('transactions')
+            // @ts-ignore
+            .insert({
+              user_id: profile.id,
+              type: 'swap',
+              token: toToken.symbol,
+              amount: toAmountNum,
+              usd_value: toUsdValue,
+              status: 'confirmed',
+            }),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Transaction timeout')), 5000)
+          )
+        ]).catch((transactionError) => {
+          // Log error but don't fail the swap - balance already updated
+          console.warn('Failed to create transaction records (non-critical):', transactionError)
+        })
       } catch (transactionError) {
         // Log error but don't fail the swap - balance already updated
         console.warn('Failed to create transaction records (non-critical):', transactionError)
       }
 
+      clearTimeout(timeoutId)
+      
       toast.success(`Swapped ${fromAmount} ${fromToken.symbol} for ${toAmount} ${toToken.symbol}`)
       setFromAmount('')
       setToAmount('')
       setToAmountUsdValue(0)
 
-      // Trigger balance update to sync wallet immediately
+      // Immediately refresh balances to show updated values
+      try {
+        await reloadBalances()
+      } catch (refreshError) {
+        console.warn('Failed to refresh balances (non-critical):', refreshError)
+      }
+
+      // Trigger balance update to sync wallet immediately (realtime subscription will handle the rest)
       window.dispatchEvent(new Event('balance-updated'))
-      
-      // Also reload balances directly with a small delay
-      setTimeout(async () => {
-        window.dispatchEvent(new Event('balance-updated'))
-        if (reloadBalances) {
-          try {
-            await reloadBalances()
-          } catch (error) {
-            console.warn('Error reloading balances:', error)
-          }
-        }
-      }, 300)
+      window.dispatchEvent(new Event('transaction-updated'))
     } catch (error: any) {
+      clearTimeout(timeoutId)
       console.error('Error swapping:', error)
-      toast.error(error.message || 'Failed to swap tokens. Please try again.')
+      const errorMessage = error?.message || 'Failed to swap tokens. Please try again.'
+      toast.error(errorMessage)
     } finally {
-      // Always reset swapping state
+      // Always reset swapping state - ensure it's reset even if error occurs
       setIsSwapping(false)
     }
   }
@@ -624,25 +594,35 @@ export function SwapMobileSection({ onBack }: SwapMobileSectionProps) {
           transition={{ duration: 0.3, delay: 0.3 }}
         >
           <motion.button
-            whileTap={{ scale: canSwap ? 0.98 : 1 }}
+            whileTap={{ scale: canSwap && !isSwapping ? 0.98 : 1 }}
             onClick={handleSwap}
-            disabled={!canSwap}
-            className={`w-full h-14 rounded-xl text-base font-bold transition-all ${
-              canSwap
+            disabled={!canSwap || isSwapping}
+            className={`w-full h-14 rounded-xl text-base font-bold transition-all flex items-center justify-center gap-2 ${
+              canSwap && !isSwapping
                 ? 'bg-white text-[#0d1020] border border-white/60 shadow-[0_10px_28px_rgba(0,0,0,0.35)] hover:bg-white/90'
+                : isSwapping
+                ? 'bg-white/20 text-white border border-white/30 cursor-wait'
                 : 'bg-white/5 text-gray-500 cursor-not-allowed border border-white/10'
             }`}
           >
-            {isSwapping 
-              ? 'Swapping...' 
-              : !fromAmount 
-                ? 'Enter Amount' 
-                : fromBalance === 0
-                  ? 'No Balance Available'
-                  : fromAmount && parseFloat(fromAmount) > fromBalance 
-                    ? 'Insufficient Balance' 
-                    : 'Swap'
-            }
+            {isSwapping ? (
+              <>
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                  className="w-5 h-5 border-2 border-white border-t-transparent rounded-full"
+                />
+                <span>Swapping...</span>
+              </>
+            ) : !fromAmount ? (
+              'Enter Amount'
+            ) : fromBalance === 0 ? (
+              'No Balance Available'
+            ) : fromAmount && parseFloat(fromAmount) > fromBalance ? (
+              'Insufficient Balance'
+            ) : (
+              'Swap'
+            )}
           </motion.button>
         </motion.div>
       </div>

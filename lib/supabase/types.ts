@@ -182,7 +182,7 @@ export interface Database {
         Row: {
           id: string
           user_id: string
-          type: 'send' | 'receive' | 'airdrop' | 'task_reward' | 'referral_reward'
+          type: 'send' | 'receive' | 'swap' | 'airdrop' | 'task_reward' | 'referral_reward'
           token: string
           amount: number
           usd_value: number
@@ -195,7 +195,7 @@ export interface Database {
         Insert: {
           id?: string
           user_id: string
-          type: 'send' | 'receive' | 'airdrop' | 'task_reward' | 'referral_reward'
+          type: 'send' | 'receive' | 'swap' | 'airdrop' | 'task_reward' | 'referral_reward'
           token: string
           amount: number
           usd_value: number
@@ -208,7 +208,7 @@ export interface Database {
         Update: {
           id?: string
           user_id?: string
-          type?: 'send' | 'receive' | 'airdrop' | 'task_reward' | 'referral_reward'
+          type?: 'send' | 'receive' | 'swap' | 'airdrop' | 'task_reward' | 'referral_reward'
           token?: string
           amount?: number
           usd_value?: number

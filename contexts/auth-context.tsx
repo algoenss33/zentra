@@ -25,35 +25,55 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    let isMounted = true
+    let timeoutId: NodeJS.Timeout | null = null
+
+    // Safety timeout - force loading to false after 3 seconds to prevent stuck loading
+    timeoutId = setTimeout(() => {
+      if (isMounted) {
+        console.warn('Auth loading timeout - forcing loading to false')
+        setLoading(false)
+      }
+    }, 3000)
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (!isMounted) return
+      
       if (error) {
         console.error('Error getting session:', error)
         setLoading(false)
+        if (timeoutId) clearTimeout(timeoutId)
         return
       }
       
       setUser(session?.user ?? null)
       if (session?.user) {
-        loadProfile(session.user.id).catch((err) => {
-          console.error('Error loading profile on initial session:', err)
-          setLoading(false)
+        loadProfile(session.user.id).finally(() => {
+          if (isMounted && timeoutId) {
+            clearTimeout(timeoutId)
+          }
         })
       } else {
         setLoading(false)
+        if (timeoutId) clearTimeout(timeoutId)
       }
     }).catch((err) => {
-      console.error('Error in getSession:', err)
-      setLoading(false)
+      if (isMounted) {
+        console.error('Error in getSession:', err)
+        setLoading(false)
+        if (timeoutId) clearTimeout(timeoutId)
+      }
     })
 
     // Listen for auth changes
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!isMounted) return
+      
       setUser(session?.user ?? null)
       if (session?.user) {
-        // Don't set loading to false here, let loadProfile handle it
         try {
           await loadProfile(session.user.id)
         } catch (error) {
@@ -66,10 +86,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      isMounted = false
+      if (timeoutId) clearTimeout(timeoutId)
+      subscription.unsubscribe()
+    }
   }, [])
 
-  const loadProfile = async (userId: string, retries = 5, delay = 500) => {
+  const loadProfile = async (userId: string) => {
     try {
       if (!userId) {
         console.warn('loadProfile called without userId')
@@ -77,6 +101,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return
       }
 
+      // Simple query - no retry, no complex timeout logic
+      // Supabase has its own timeout, and we have safety timeout in useEffect
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -92,72 +118,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           error.message?.toLowerCase().includes('not found') ||
           error.message?.toLowerCase().includes('does not exist')
 
-        // If profile not found and we have retries left, wait and retry
-        if (isNotFound && retries > 0) {
-          // Exponential backoff: increase delay with each retry
-          const nextDelay = delay * 1.5
-          await new Promise(resolve => setTimeout(resolve, delay))
-          return loadProfile(userId, retries - 1, nextDelay)
-        }
-
-        // If it's a not found error and no retries left, set profile to null
         if (isNotFound) {
-          console.warn(`Profile not found for user ${userId} after ${retries} retries`)
           setProfile(null)
           setLoading(false)
           return
         }
 
-        // For other errors, log and throw
-        if (error && (error.message || error.code || error.details)) {
-          console.error('Error loading profile:', {
-            code: error.code,
-            message: error.message,
-            details: error.details,
-            hint: error.hint
-          })
+        // For other errors, log but don't block UI
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('Error loading profile:', error.message || error.code)
         }
-        throw error
+        setProfile(null)
+        setLoading(false)
+        return
       }
 
       // Successfully loaded profile
       if (data) {
         setProfile(data)
-        setLoading(false)
       } else {
-        console.warn('Profile data is null for user:', userId)
         setProfile(null)
-        setLoading(false)
       }
+      setLoading(false)
     } catch (error: any) {
-      // Handle caught errors
-      const isNotFound = 
-        error?.code === 'PGRST116' || 
-        error?.code === '42P01' ||
-        error?.message?.toLowerCase()?.includes('no rows') || 
-        error?.message?.toLowerCase()?.includes('not found') ||
-        error?.message?.toLowerCase()?.includes('does not exist')
-
-      if (!isNotFound) {
-        // Only log non-not-found errors with actual content
-        const hasErrorContent = error && (
-          error.message || 
-          error.code || 
-          error.details ||
-          (typeof error === 'object' && Object.keys(error).length > 0)
-        )
-        
-        if (hasErrorContent) {
-          console.error('Error loading profile:', {
-            code: error?.code,
-            message: error?.message,
-            details: error?.details,
-            hint: error?.hint,
-            error: error
-          })
-        }
+      // Handle all errors gracefully - don't block UI
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('Error loading profile (non-blocking):', error?.message || error)
       }
-      
+      setProfile(null)
       setLoading(false)
     }
   }
@@ -322,15 +310,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Also try to load profile from database to ensure consistency
       // Wait a bit to ensure all database operations are complete
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await new Promise(resolve => setTimeout(resolve, 300))
       
-      // Load profile with retries to ensure it's properly loaded
+      // Load profile to ensure it's properly loaded
       try {
-        await loadProfile(authData.user.id, 3, 300)
+        await loadProfile(authData.user.id)
       } catch (loadError) {
         // If loadProfile fails but we have profileData, continue
         // The profile was already set above
-        console.warn('Error loading profile after signup, but profile was created:', loadError)
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('Error loading profile after signup, but profile was created:', loadError)
+        }
       }
 
       return { error: null }
@@ -348,8 +338,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = async () => {
-    await supabase.auth.signOut()
-    setProfile(null)
+    try {
+      // Clear profile state first to prevent UI flicker
+      setProfile(null)
+      
+      // Clear all Supabase sessions with timeout protection
+      const signOutPromise = supabase.auth.signOut()
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Sign out timeout')), 8000)
+      })
+      
+      await Promise.race([signOutPromise, timeoutPromise])
+      
+      // Ensure user state is cleared
+      setUser(null)
+      
+      // Clear any cached data
+      if (typeof window !== 'undefined') {
+        // Clear session storage
+        sessionStorage.clear()
+        // Note: We keep referral_code in localStorage for next signup
+      }
+    } catch (error) {
+      console.error('Error during sign out:', error)
+      // Even if signOut fails, clear local state
+      setUser(null)
+      setProfile(null)
+      throw error // Re-throw to let caller handle
+    }
   }
 
   const refreshProfile = async () => {

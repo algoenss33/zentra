@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { CheckCircle, Circle, Trophy, Loader2, ExternalLink } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -13,7 +13,6 @@ type Task = Database['public']['Tables']['tasks']['Row']
 
 const AVAILABLE_TASKS = [
   { type: 'join_telegram_group', name: 'Join Telegram Group', reward: 5, link: 'https://t.me/zentragroup' },
-  { type: 'join_telegram_channel', name: 'Join Telegram Channel', reward: 5, link: 'https://t.me/zentrachannel' },
   { type: 'invite_3', name: 'Invite 3 People', reward: 10 },
   { type: 'invite_5', name: 'Invite 5 People', reward: 20 },
   { type: 'invite_10', name: 'Invite 10 People', reward: 50 },
@@ -22,28 +21,48 @@ const AVAILABLE_TASKS = [
 export function TasksSection() {
   const { profile } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false) // Start with false - don't block UI
   const [referralCount, setReferralCount] = useState(0)
   const [completingTask, setCompletingTask] = useState<string | null>(null)
   const [openedLinks, setOpenedLinks] = useState<Set<string>>(new Set())
 
-  useEffect(() => {
-    if (profile) {
-      // Load tasks and referral count on mount/refresh
-      const initializeData = async () => {
-        await Promise.all([
-          loadTasks(true), // Show loading on initial load
-          loadReferralCount()
-        ])
-        
-        // After initial load, trigger balance update to ensure sync
-        // Small delay to ensure tasks are loaded first
-        setTimeout(() => {
-          window.dispatchEvent(new Event('balance-updated'))
-        }, 500)
+  const loadTasks = useCallback(async (showLoading: boolean = false) => {
+    if (!profile) return
+
+    if (showLoading) {
+      setLoading(true)
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('user_id', profile.id)
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      if (data) {
+        setTasks(data || [])
       }
-      
-      initializeData()
+    } catch (error: any) {
+      console.error('Error loading tasks:', error)
+      // Don't show error toast - keep existing data
+    } finally {
+      if (showLoading) {
+        setLoading(false)
+      }
+    }
+  }, [profile])
+
+  useEffect(() => {
+    if (!profile) {
+      setTasks([])
+      return
+    }
+
+    // Load tasks and referral count on mount
+    loadTasks(true)
+    loadReferralCount()
 
       // Subscribe to real-time updates for tasks
       const channel = supabase
@@ -65,22 +84,16 @@ export function TasksSection() {
         )
         .subscribe()
 
-      // Listen for balance updates to reload tasks if needed
-      const handleBalanceUpdate = () => {
-        // Reload tasks in background to ensure sync
-        loadTasks(false)
-      }
-      
-      window.addEventListener('balance-updated', handleBalanceUpdate)
-
-      return () => {
+    return () => {
+      try {
         supabase.removeChannel(channel).catch(() => {
           // Silently handle channel removal errors during cleanup
         })
-        window.removeEventListener('balance-updated', handleBalanceUpdate)
+      } catch (error) {
+        // Silently handle errors
       }
     }
-  }, [profile])
+  }, [profile, loadTasks])
 
   const loadReferralCount = async () => {
     if (!profile) return
@@ -96,38 +109,6 @@ export function TasksSection() {
       setReferralCount(data?.length || 0)
     } catch (error: any) {
       console.error('Error loading referral count:', error)
-    }
-  }
-
-  const loadTasks = async (showLoading: boolean = false) => {
-    if (!profile) return
-
-    if (showLoading && loading) {
-      setLoading(true)
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('user_id', profile.id)
-        .order('created_at', { ascending: false })
-
-      if (error) throw error
-      
-      if (data) {
-        setTasks(data || [])
-      }
-    } catch (error: any) {
-      console.error('Error loading tasks:', error)
-      // Don't show error toast on background reloads
-      if (showLoading) {
-        toast.error('Failed to load tasks')
-      }
-    } finally {
-      if (showLoading) {
-        setLoading(false)
-      }
     }
   }
 
@@ -276,19 +257,11 @@ export function TasksSection() {
 
       toast.success(`Task completed! You earned ${rewardAmount} ZENTRA tokens.`)
       
-      // Reload tasks to get actual data from database (realtime will also update)
-      // Don't show loading on background reload
+      // Reload tasks to get actual data from database (realtime subscription will also update)
       await loadTasks(false)
       
-      // Trigger balance update event after tasks are reloaded
-      // Multiple triggers to ensure balance sync
+      // Trigger balance update once - real-time subscription will handle the rest
       window.dispatchEvent(new Event('balance-updated'))
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 300)
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 1000)
     } catch (error: any) {
       console.error('Error completing task:', error)
       toast.error('Failed to complete task. Please try again.')
@@ -308,20 +281,11 @@ export function TasksSection() {
     setOpenedLinks(prev => new Set(prev).add(taskType))
     
     // For telegram tasks, automatically complete after opening link
-    if (taskType === 'join_telegram_group' || taskType === 'join_telegram_channel') {
+    if (taskType === 'join_telegram_group') {
       // Check if task is already completed
       const existingTask = tasks.find(t => t.task_type === taskType)
       if (existingTask && existingTask.status === 'completed') {
         return
-      }
-      
-      // Check prerequisites
-      if (taskType === 'join_telegram_channel') {
-        const telegramGroupTask = tasks.find(t => t.task_type === 'join_telegram_group')
-        if (!telegramGroupTask || telegramGroupTask.status !== 'completed') {
-          // Still open link, but don't auto-complete
-          return
-        }
       }
       
       // Small delay to ensure link opens, then auto-complete
@@ -331,11 +295,6 @@ export function TasksSection() {
     }
   }
 
-  // Check if telegram group task is completed (required for telegram channel)
-  const isTelegramGroupCompleted = () => {
-    const telegramGroupTask = tasks.find(t => t.task_type === 'join_telegram_group')
-    return telegramGroupTask?.status === 'completed'
-  }
 
 
   const getTaskStatus = (taskType: string) => {
@@ -378,19 +337,14 @@ export function TasksSection() {
             const isCompleted = status === 'completed'
             const progress = getTaskProgress(task.type)
             const canComplete = !progress || progress.current >= progress.required
-            
-            // Check if telegram channel requires telegram group to be completed first
-            const requiresTelegramGroup = task.type === 'join_telegram_channel'
-            const telegramGroupCompleted = isTelegramGroupCompleted()
             const hasOpenedLink = openedLinks.has(task.type)
             
             // Show complete button if:
-            // 1. For telegram tasks: link has been opened AND (no prerequisite OR prerequisite completed)
-            //    OR task is already completed (will show completed status)
+            // 1. For telegram tasks: link has been opened OR task is already completed
             // 2. For invite tasks: progress requirement met
             const canShowComplete = task.link 
-              ? (hasOpenedLink && (!requiresTelegramGroup || telegramGroupCompleted)) || isCompleted
-              : (!requiresTelegramGroup || telegramGroupCompleted) || isCompleted
+              ? hasOpenedLink || isCompleted
+              : true
 
             return (
               <div
@@ -413,13 +367,7 @@ export function TasksSection() {
                         Progress: {progress.current}/{progress.required} invites
                       </div>
                     )}
-                    {requiresTelegramGroup && !telegramGroupCompleted && !isCompleted && (
-                      <div className="text-xs text-amber-400 mt-1 flex items-center gap-1">
-                        <span>⚠️</span>
-                        <span>Complete "Join Telegram Group" first</span>
-                      </div>
-                    )}
-                    {task.link && !hasOpenedLink && !isCompleted && (!requiresTelegramGroup || telegramGroupCompleted) && (
+                    {task.link && !hasOpenedLink && !isCompleted && (
                       <div className="text-xs text-blue-400 mt-1">
                         Click "Open Link" to complete task
                       </div>
@@ -460,8 +408,6 @@ export function TasksSection() {
                         'Complete'
                       )}
                     </Button>
-                  ) : hasOpenedLink && requiresTelegramGroup && !telegramGroupCompleted ? (
-                    <span className="text-xs text-amber-400">Waiting...</span>
                   ) : (
                     <span className="text-xs text-gray-500">Locked</span>
                   )}

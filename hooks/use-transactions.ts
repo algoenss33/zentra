@@ -26,6 +26,7 @@ export function useTransactions() {
         .from('transactions')
         .select('*')
         .eq('user_id', user.id)
+        .neq('type', 'send') // Exclude 'send' transactions from activity - only show popup notification
         .order('created_at', { ascending: false })
         .limit(50) // Increased limit to show more transactions
 

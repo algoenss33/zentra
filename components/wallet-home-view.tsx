@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import { useBalance } from "@/hooks/use-balance"
 import { useCryptoPrices } from "@/hooks/use-crypto-prices"
 import { useAuth } from "@/contexts/auth-context"
+import { toast } from "sonner"
 import Image from "next/image"
 import {
   Send,
@@ -161,14 +162,7 @@ export function WalletHomeView({
     { id: 4, name: 'NFT 4', image: '/placeholder.jpg' },
   ]
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-[#0B0E11]">
-        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-yellow-400"></div>
-      </div>
-    )
-  }
-
+  // Don't block UI with loading - always show content with fallback data
   return (
     <div className="bg-gradient-to-br from-[#0d1020] via-[#0b0e11] to-[#04060d] text-white w-full h-full relative overflow-hidden flex flex-col" style={{ minHeight: '100%', height: '100%' }}>
       {/* Ambient gradient blobs matching logo colors */}

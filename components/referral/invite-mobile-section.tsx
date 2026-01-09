@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { Copy, Users, Gift, CheckCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -14,18 +14,15 @@ type Referral = Database['public']['Tables']['referrals']['Row']
 export function InviteMobileSection() {
   const { profile } = useAuth()
   const [referrals, setReferrals] = useState<Referral[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false) // Start with false - don't block UI
   const [referralCode, setReferralCode] = useState("")
 
-  useEffect(() => {
-    if (profile) {
-      loadReferrals()
-      setReferralCode(profile.referral_code)
-    }
-  }, [profile])
-
-  const loadReferrals = async () => {
+  const loadReferrals = useCallback(async (showLoading: boolean = false) => {
     if (!profile) return
+
+    if (showLoading) {
+      setLoading(true)
+    }
 
     try {
       const { data, error } = await supabase
@@ -35,14 +32,53 @@ export function InviteMobileSection() {
         .order('created_at', { ascending: false })
 
       if (error) throw error
-      setReferrals(data || [])
+      if (data) {
+        setReferrals(data || [])
+      }
     } catch (error: any) {
       console.error('Error loading referrals:', error)
-      toast.error('Failed to load referrals')
+      // Don't show error toast - keep existing data
     } finally {
-      setLoading(false)
+      if (showLoading) {
+        setLoading(false)
+      }
     }
-  }
+  }, [profile])
+
+  useEffect(() => {
+    if (!profile) {
+      setReferrals([])
+      return
+    }
+
+    setReferralCode(profile.referral_code)
+    // Load referrals on mount
+    loadReferrals(true)
+
+    // Subscribe to real-time updates
+    const channel = supabase
+      .channel(`referrals-changes-${profile.id}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'referrals',
+          filter: `referrer_id=eq.${profile.id}`,
+        },
+        () => {
+          // Update in background without showing loading
+          loadReferrals(false)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {
+        // Silently handle channel removal errors during cleanup
+      })
+    }
+  }, [profile, loadReferrals])
 
   const copyReferralCode = () => {
     const fullUrl = `${window.location.origin}?ref=${referralCode}`

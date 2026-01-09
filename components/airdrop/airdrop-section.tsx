@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { Gift, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -14,38 +14,14 @@ type Airdrop = Database['public']['Tables']['airdrops']['Row']
 export function AirdropSection() {
   const { profile } = useAuth()
   const [airdrops, setAirdrops] = useState<Airdrop[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false) // Start with false - don't block UI
 
-  useEffect(() => {
-    if (profile) {
-      // Load airdrops on mount/refresh
-      const initializeData = async () => {
-        await loadAirdrops()
-        
-        // After initial load, trigger balance update to ensure sync
-        setTimeout(() => {
-          window.dispatchEvent(new Event('balance-updated'))
-        }, 500)
-      }
-      
-      initializeData()
-
-      // Listen for balance updates to reload airdrops if needed
-      const handleBalanceUpdate = () => {
-        // Reload airdrops in background to ensure sync
-        loadAirdrops()
-      }
-      
-      window.addEventListener('balance-updated', handleBalanceUpdate)
-
-      return () => {
-        window.removeEventListener('balance-updated', handleBalanceUpdate)
-      }
-    }
-  }, [profile])
-
-  const loadAirdrops = async () => {
+  const loadAirdrops = useCallback(async (showLoading: boolean = false) => {
     if (!profile) return
+
+    if (showLoading) {
+      setLoading(true)
+    }
 
     try {
       const { data, error } = await supabase
@@ -55,14 +31,52 @@ export function AirdropSection() {
         .order('created_at', { ascending: false })
 
       if (error) throw error
-      setAirdrops(data || [])
+      if (data) {
+        setAirdrops(data || [])
+      }
     } catch (error: any) {
       console.error('Error loading airdrops:', error)
-      toast.error('Failed to load airdrops')
+      // Don't show toast on error - keep existing data
     } finally {
-      setLoading(false)
+      if (showLoading) {
+        setLoading(false)
+      }
     }
-  }
+  }, [profile])
+
+  useEffect(() => {
+    if (!profile) {
+      setAirdrops([])
+      return
+    }
+
+    // Load airdrops on mount
+    loadAirdrops(true)
+
+    // Subscribe to real-time updates
+    const channel = supabase
+      .channel(`airdrops-changes-${profile.id}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'airdrops',
+          filter: `user_id=eq.${profile.id}`,
+        },
+        () => {
+          // Update in background without showing loading
+          loadAirdrops(false)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {
+        // Silently handle channel removal errors during cleanup
+      })
+    }
+  }, [profile, loadAirdrops])
 
   const claimAirdrop = async (airdropId: string) => {
     if (!profile) return
@@ -127,18 +141,9 @@ export function AirdropSection() {
 
       toast.success(`Airdrop claimed successfully! You received ${amount} ${token}.`)
       
-      // Reload airdrops to get actual data from database
-      await loadAirdrops()
-      
-      // Trigger balance update event after airdrops are reloaded
-      // Multiple triggers to ensure balance sync
+      // Trigger balance and transaction updates (realtime subscription will handle the rest)
       window.dispatchEvent(new Event('balance-updated'))
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 300)
-      setTimeout(() => {
-        window.dispatchEvent(new Event('balance-updated'))
-      }, 1000)
+      window.dispatchEvent(new Event('transaction-updated'))
     } catch (error: any) {
       console.error('Error claiming airdrop:', error)
       toast.error('Failed to claim airdrop')

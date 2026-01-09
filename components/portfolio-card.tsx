@@ -2,22 +2,11 @@
 
 import { motion } from "framer-motion"
 import { useBalance } from "@/hooks/use-balance"
-import { Loader2 } from "lucide-react"
 
 export function PortfolioCard() {
-  const { getTotalPortfolioValue, getZentraBalance, zentraPrice, loading } = useBalance()
+  const { getTotalPortfolioValue, getZentraBalance, zentraPrice } = useBalance()
   const totalValue = getTotalPortfolioValue()
   const zentraBalance = getZentraBalance()
-
-  if (loading) {
-    return (
-      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="glass p-8 rounded-xl">
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-8 h-8 animate-spin text-primary" />
-        </div>
-      </motion.div>
-    )
-  }
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="glass p-4 sm:p-6 md:p-8 rounded-xl">
